@@ -1,459 +1,479 @@
-/**
- * Outbound - Enhanced Shipping Page
- * @description Complete shipping workflow with carrier integration and label generation
- */
-
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
     Truck,
     Package,
     Printer,
     Scan,
     CheckCircle,
-    Clock,
-    MapPin,
-    FileText,
-    Download,
-    ExternalLink,
-    AlertCircle,
-    Weight,
+    XCircle,
+    ChevronDown,
+    ChevronUp,
+    Search,
+    History,
+    Info,
     QrCode,
+    ArrowRight,
 } from 'lucide-react';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { cn, formatRelativeTime } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import { toast } from 'react-hot-toast';
+import { supabase } from '@/lib/supabase';
 
-// Mock data - will be replaced with real Supabase queries
-const packedShipments = [
-    {
-        id: '77777777-7777-7777-7777-777777777706',
-        orderNumber: 'ORD-2026-0006',
-        customer: 'Cloud Systems Inc',
-        shippingAddress: '222 Data Center Way, Phoenix, AZ 85001',
-        carrier: null,
-        trackingNumber: null,
-        weightKg: 5.7,
-        totalItems: 4,
-        totalValue: 4250.00,
-        status: 'packed',
-        packedAt: '2026-01-24T15:30:00Z',
-        packedBy: 'Carlos Mendez',
-        lineItems: [
-            { sku: 'APL-MBP14-M3-512', product: 'MacBook Pro 14" M3', quantity: 2, location: 'A2101' },
-            { sku: 'APL-AIRPM2-WH', product: 'AirPods Pro 2nd Gen', quantity: 2, location: 'B1202' },
-        ],
-    },
-    {
-        id: '77777777-7777-7777-7777-777777777707',
-        orderNumber: 'ORD-2026-0007',
-        customer: 'Mobile First Corp',
-        shippingAddress: '444 App Street, New York, NY 10001',
-        carrier: 'fedex',
-        trackingNumber: '794612345671',
-        weightKg: 1.2,
-        totalItems: 2,
-        totalValue: 1450.00,
-        status: 'shipped',
-        packedAt: '2026-01-24T14:00:00Z',
-        packedBy: 'Maria Garcia',
-        shippedAt: '2026-01-24T16:00:00Z',
-        lineItems: [
-            { sku: 'APL-IP15PM-256-BK', product: 'iPhone 15 Pro Max', quantity: 1, location: 'A1101' },
-            { sku: 'APL-AIRPM2-WH', product: 'AirPods Pro', quantity: 1, location: 'B1202' },
-        ],
-    },
-    {
-        id: '77777777-7777-7777-7777-777777777708',
-        orderNumber: 'ORD-2026-0008',
-        customer: 'Tech Retail LLC',
-        shippingAddress: '789 Commerce St, Los Angeles, CA 90001',
-        carrier: null,
-        trackingNumber: null,
-        weightKg: 0.9,
-        totalItems: 5,
-        totalValue: 1000.00,
-        status: 'packed',
-        packedAt: '2026-01-24T15:45:00Z',
-        packedBy: 'Carlos Mendez',
-        lineItems: [
-            { sku: 'APL-AIRPM2-WH', product: 'AirPods Pro 2nd Gen', quantity: 5, location: 'B1202' },
-        ],
-    },
-];
+interface ShipmentLine {
+    id: string;
+    product: {
+        id: string;
+        name: string;
+        sku: string;
+        weight: number;
+    };
+    quantity: number;
+}
 
-const carrierInfo = {
-    fedex: {
-        name: 'FedEx',
-        color: 'text-purple-400 bg-purple-400/10',
-        trackingUrl: 'https://www.fedex.com/fedextrack/?trknbr=',
-    },
-    ups: {
-        name: 'UPS',
-        color: 'text-amber-400 bg-amber-400/10',
-        trackingUrl: 'https://www.ups.com/track?tracknum=',
-    },
-    dhl: {
-        name: 'DHL',
-        color: 'text-red-400 bg-red-400/10',
-        trackingUrl: 'https://www.dhl.com/track?trackingNumber=',
-    },
-    usps: {
-        name: 'USPS',
-        color: 'text-blue-400 bg-blue-400/10',
-        trackingUrl: 'https://tools.usps.com/go/TrackConfirmAction?tLabels=',
-    },
-};
+interface Shipment {
+    id: string;
+    order_number: string;
+    customer_name: string;
+    status: string;
+    shipment_lines: ShipmentLine[];
+    carrier?: string;
+    tracking_number?: string;
+}
 
-export default function ShippingPage(): React.JSX.Element {
-    const [scanMode, setScanMode] = useState(false);
-    const [selectedShipment, setSelectedShipment] = useState<string | null>(null);
-    const [expandedRow, setExpandedRow] = useState<string | null>(null);
+interface Summary {
+    count: number;
+    weight: number;
+}
 
-    const totalWeight = packedShipments.reduce((sum, s) => sum + s.weightKg, 0);
-    const totalUnits = packedShipments.reduce((sum, s) => sum + s.totalItems, 0);
-    const totalValue = packedShipments.reduce((sum, s) => sum + s.totalValue, 0);
+interface HandOffLogEntry {
+    id: string;
+    shipment_id: string;
+    carrier: string;
+    tracking_number: string;
+    shipped_at: string;
+    weight_kg: number;
+    shipment: {
+        order_number: string;
+        customer_name: string;
+    };
+    user: {
+        full_name: string;
+    };
+}
 
-    const stats = {
-        readyToShip: packedShipments.filter(s => s.status === 'packed').length,
-        shipped: packedShipments.filter(s => s.status === 'shipped').length,
-        totalWeight,
-        totalUnits,
-        totalValue,
+export default function ShippingPage() {
+    const [waves, setWaves] = useState<any[]>([]);
+    const [selectedWaveId, setSelectedWaveId] = useState<string>('');
+    const [shipments, setShipments] = useState<Shipment[]>([]);
+    const [summary, setSummary] = useState<Summary>({ count: 0, weight: 0 });
+    const [handOffLog, setHandOffLog] = useState<HandOffLogEntry[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [expandedShipmentId, setExpandedShipmentId] = useState<string | null>(null);
+    const [scannedBarcode, setScannedBarcode] = useState('');
+    const [selectedCarrier, setSelectedCarrier] = useState<'fedex' | 'ups' | 'dhl'>('fedex');
+    const [isVerifying, setIsVerifying] = useState<string | null>(null);
+    const [isConfirming, setIsConfirming] = useState<string | null>(null);
+
+    // No need to initialize, using imported supabase
+
+    // Load shippable waves
+    useEffect(() => {
+        async function fetchWaves() {
+            const { data, error } = await supabase
+                .from('waves')
+                .select('id, wave_number')
+                .eq('status', 'packing')
+                .order('created_at', { ascending: false });
+
+            if (error) {
+                toast.error('Failed to load waves');
+            } else {
+                setWaves(data || []);
+            }
+        }
+        fetchWaves();
+    }, [supabase]);
+
+    // Load data for selected wave
+    const fetchWaveData = useCallback(async (waveId: string) => {
+        if (!waveId) return;
+        setLoading(true);
+        try {
+            const resp = await fetch(`/api/outbound/shipping/wave/${waveId}`);
+            const data = await resp.json();
+            if (data.error) throw new Error(data.error);
+
+            setShipments(data.shipments);
+            setSummary(data.summary);
+
+            const logResp = await fetch(`/api/outbound/shipping/log/${waveId}`);
+            const logData = await logResp.json();
+            setHandOffLog(logData.handOffLog || []);
+        } catch (error: any) {
+            toast.error(error.message);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (selectedWaveId) {
+            fetchWaveData(selectedWaveId);
+        }
+    }, [selectedWaveId, fetchWaveData]);
+
+    const handlePrintLabel = async (shipmentId: string) => {
+        try {
+            const resp = await fetch('/api/outbound/shipping/label', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ shipmentId }),
+            });
+            const data = await resp.json();
+            if (data.zplCode) {
+                console.log('ZPL Code for Thermal Printer:', data.zplCode);
+                toast.success('Label generated! Check console for ZPL code.');
+                // In reality, send to print service
+            }
+        } catch (error) {
+            toast.error('Failed to generate label');
+        }
     };
 
-    const handleGenerateLabel = (shipmentId: string) => {
-        // TODO: Call API to generate ZPL label
-        console.log('Generating label for:', shipmentId);
-        alert('Label generation will be implemented with thermal printer support');
+    const handleVerify = async (shipmentId: string, barcode: string) => {
+        if (!barcode) return;
+        setIsVerifying(shipmentId);
+        try {
+            const resp = await fetch('/api/outbound/shipping/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ shipmentId, scannedBarcode: barcode }),
+            });
+            const data = await resp.json();
+            if (data.isValid) {
+                toast.success(data.message, { icon: '✓', style: { background: '#D1FAE5', color: '#065F46' } });
+                setScannedBarcode('');
+            } else {
+                toast.error(data.message, { icon: '✗', style: { background: '#FEE2E2', color: '#991B1B' } });
+            }
+        } catch (error) {
+            toast.error('Verification failed');
+        } finally {
+            setIsVerifying(null);
+        }
     };
 
-    const handleConfirmShipment = (shipmentId: string, carrier: string) => {
-        // TODO: Call API to confirm shipment
-        console.log('Confirming shipment:', shipmentId, 'via', carrier);
-        alert(`Shipment confirmed via ${carrier}. Tracking number will be generated.`);
+    const handleConfirm = async (shipmentId: string) => {
+        setIsConfirming(shipmentId);
+        try {
+            const resp = await fetch('/api/outbound/shipping/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ shipmentId, carrier: selectedCarrier }),
+            });
+            const data = await resp.json();
+            if (data.error) throw new Error(data.error);
+
+            toast.success(data.message);
+            fetchWaveData(selectedWaveId); // Refresh data
+        } catch (error: any) {
+            toast.error(error.message);
+        } finally {
+            setIsConfirming(null);
+        }
     };
 
     return (
-        <div className="min-h-screen bg-slate-950">
+        <div className="min-h-screen bg-slate-50">
             <Sidebar />
-
             <main className="main-content">
-                <div className="page-container animate-fade-in">
+                <div className="page-container animate-fade-in space-y-6">
                     {/* Header */}
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                         <div>
-                            <h1 className="text-2xl font-bold text-slate-100">Shipping</h1>
-                            <p className="text-slate-400 mt-1">
-                                Generate labels and hand-off to carriers
+                            <h1 className="text-2xl font-bold text-slate-900">Shipping Module</h1>
+                            <p className="text-slate-500 mt-1">Final order verification and carrier hand-off</p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-4">
+                            <div className="relative min-w-[240px]">
+                                <select
+                                    value={selectedWaveId}
+                                    onChange={(e) => setSelectedWaveId(e.target.value)}
+                                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none"
+                                >
+                                    <option value="">Select Packed Wave...</option>
+                                    {waves.map((wave) => (
+                                        <option key={wave.id} value={wave.id}>
+                                            {wave.wave_number}
+                                        </option>
+                                    ))}
+                                </select>
+                                <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                            </div>
+
+                            <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-lg">
+                                <select
+                                    value={selectedCarrier}
+                                    onChange={(e) => setSelectedCarrier(e.target.value as any)}
+                                    className="bg-transparent text-sm font-medium text-slate-700 px-3 py-1.5 outline-none"
+                                >
+                                    <option value="fedex">FedEx</option>
+                                    <option value="ups">UPS</option>
+                                    <option value="dhl">DHL</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    {!selectedWaveId ? (
+                        <Card className="flex flex-col items-center justify-center p-20 text-center space-y-4">
+                            <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center">
+                                <Truck className="w-8 h-8 text-blue-500" />
+                            </div>
+                            <h3 className="text-xl font-semibold text-slate-800">No Wave Selected</h3>
+                            <p className="text-slate-500 max-w-sm">
+                                Select a wave with "Packed" status from the menu above to start the shipping process.
                             </p>
-                        </div>
-                        <div className="flex gap-3">
-                            <Button
-                                variant="secondary"
-                                size="sm"
-                                leftIcon={<Download className="w-4 h-4" />}
-                            >
-                                End of Day Manifest
-                            </Button>
-                            <Button
-                                variant={scanMode ? 'primary' : 'secondary'}
-                                size="sm"
-                                leftIcon={<Scan className="w-4 h-4" />}
-                                onClick={() => setScanMode(!scanMode)}
-                            >
-                                {scanMode ? 'Scanning...' : 'Scan to Ship'}
-                            </Button>
-                        </div>
-                    </div>
-
-                    {/* Summary Cards */}
-                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
-                        <Card variant="glass" className="border-blue-500/30">
-                            <div className="text-center">
-                                <div className="text-3xl font-bold text-blue-400">{stats.readyToShip}</div>
-                                <div className="text-sm text-slate-400 mt-1">Ready to Ship</div>
-                            </div>
                         </Card>
-
-                        <Card variant="glass" className="border-emerald-500/30">
-                            <div className="text-center">
-                                <div className="text-3xl font-bold text-emerald-400">{stats.shipped}</div>
-                                <div className="text-sm text-slate-400 mt-1">Shipped Today</div>
-                            </div>
-                        </Card>
-
-                        <Card variant="glass">
-                            <div className="text-center">
-                                <div className="text-3xl font-bold text-slate-100">{stats.totalUnits}</div>
-                                <div className="text-sm text-slate-400 mt-1">Total Units</div>
-                            </div>
-                        </Card>
-
-                        <Card variant="glass">
-                            <div className="text-center">
-                                <div className="text-3xl font-bold text-slate-100">{stats.totalWeight.toFixed(1)}</div>
-                                <div className="text-sm text-slate-400 mt-1">kg Total</div>
-                            </div>
-                        </Card>
-
-                        <Card variant="glass">
-                            <div className="text-center">
-                                <div className="text-3xl font-bold text-slate-100">${(stats.totalValue / 1000).toFixed(1)}k</div>
-                                <div className="text-sm text-slate-400 mt-1">Total Value</div>
-                            </div>
-                        </Card>
-                    </div>
-
-                    {/* Scan Mode */}
-                    {scanMode && (
-                        <Card variant="glass" className="mb-8 border-blue-500/30">
-                            <div className="text-center py-6">
-                                <div className="w-16 h-16 rounded-2xl bg-blue-500/20 flex items-center justify-center mx-auto mb-4">
-                                    <Scan className="w-8 h-8 text-blue-400 animate-pulse" />
+                    ) : (
+                        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                            {/* Summary and List */}
+                            <div className="lg:col-span-3 space-y-6">
+                                {/* Summary Cards */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <Card className="p-5 border-l-4 border-l-blue-500 flex items-center justify-between">
+                                        <div>
+                                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Total Shipments</p>
+                                            <p className="text-2xl font-bold text-slate-900 mt-1">{summary.count}</p>
+                                        </div>
+                                        <Package className="w-10 h-10 text-blue-100" />
+                                    </Card>
+                                    <Card className="p-5 border-l-4 border-l-emerald-500 flex items-center justify-between">
+                                        <div>
+                                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Total Weight</p>
+                                            <p className="text-2xl font-bold text-slate-900 mt-1">{summary.weight} kg</p>
+                                        </div>
+                                        <Truck className="w-10 h-10 text-emerald-100" />
+                                    </Card>
+                                    <Card className="p-5 border-l-4 border-l-amber-500 flex items-center justify-between">
+                                        <div>
+                                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Estimated Revenue</p>
+                                            <p className="text-2xl font-bold text-slate-900 mt-1">$4,250.00</p>
+                                        </div>
+                                        <History className="w-10 h-10 text-amber-100" />
+                                    </Card>
                                 </div>
-                                <h3 className="text-lg font-semibold text-slate-100 mb-2">
-                                    Scan Order Barcode or Tracking Number
-                                </h3>
-                                <p className="text-slate-400 mb-6">
-                                    Scan to verify shipment before carrier hand-off
-                                </p>
-                                <div className="max-w-md mx-auto">
-                                    <Input
-                                        placeholder="Scan barcode..."
-                                        leftIcon={<Scan className="w-5 h-5" />}
-                                        autoFocus
-                                    />
-                                </div>
-                            </div>
-                        </Card>
-                    )}
 
-                    {/* Shipments Table */}
-                    <Card variant="elevated" padded={false}>
-                        <div className="p-6 border-b border-slate-700/50">
-                            <CardHeader
-                                title="Packed Shipments"
-                                subtitle={`${packedShipments.length} shipments ready for carrier hand-off`}
-                            />
-                        </div>
-
-                        <div className="divide-y divide-slate-700/30">
-                            {packedShipments.map((shipment) => (
-                                <div key={shipment.id}>
-                                    {/* Main Row */}
-                                    <div
-                                        className={cn(
-                                            'p-6 transition-colors cursor-pointer',
-                                            selectedShipment === shipment.id ? 'bg-blue-500/5 border-l-4 border-blue-500' : 'hover:bg-slate-800/30',
-                                            shipment.status === 'shipped' && 'bg-emerald-500/5'
-                                        )}
-                                        onClick={() => {
-                                            setSelectedShipment(shipment.id);
-                                            setExpandedRow(expandedRow === shipment.id ? null : shipment.id);
-                                        }}
-                                    >
-                                        <div className="flex items-start gap-4">
-                                            <div className={cn(
-                                                'w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0',
-                                                shipment.status === 'shipped' ? 'bg-emerald-500/20' : 'bg-blue-500/20'
-                                            )}>
-                                                {shipment.status === 'shipped' ? (
-                                                    <CheckCircle className="w-6 h-6 text-emerald-400" />
-                                                ) : (
-                                                    <Package className="w-6 h-6 text-blue-400" />
-                                                )}
-                                            </div>
-
-                                            <div className="flex-1">
-                                                <div className="flex items-start justify-between mb-3">
-                                                    <div>
-                                                        <div className="flex items-center gap-2 mb-1">
-                                                            <h3 className="font-mono font-semibold text-lg text-slate-100">
-                                                                {shipment.orderNumber}
-                                                            </h3>
-                                                            {shipment.status === 'shipped' && (
-                                                                <span className="px-2.5 py-1 rounded-full text-xs font-medium text-emerald-400 bg-emerald-400/10">
-                                                                    Shipped
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        <p className="text-sm font-medium text-slate-200">{shipment.customer}</p>
-                                                        <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                                                            <MapPin className="w-3 h-3" />
-                                                            {shipment.shippingAddress}
-                                                        </p>
-                                                    </div>
-                                                    <div className="text-right">
-                                                        <div className="text-sm text-slate-400">Total Value</div>
-                                                        <div className="text-xl font-bold text-slate-100">
-                                                            ${shipment.totalValue.toLocaleString()}
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                <div className="grid grid-cols-4 gap-4 mb-4">
-                                                    <div className="bg-slate-800/50 rounded-lg p-3">
-                                                        <div className="text-xs text-slate-400 mb-1 flex items-center gap-1">
-                                                            <Package className="w-3 h-3" />
-                                                            Units
-                                                        </div>
-                                                        <div className="text-lg font-semibold text-slate-100">{shipment.totalItems}</div>
-                                                    </div>
-
-                                                    <div className="bg-slate-800/50 rounded-lg p-3">
-                                                        <div className="text-xs text-slate-400 mb-1 flex items-center gap-1">
-                                                            <Weight className="w-3 h-3" />
-                                                            Weight
-                                                        </div>
-                                                        <div className="text-lg font-semibold text-slate-100">{shipment.weightKg} kg</div>
-                                                    </div>
-
-                                                    <div className="bg-slate-800/50 rounded-lg p-3 col-span-2">
-                                                        <div className="text-xs text-slate-400 mb-1">
-                                                            {shipment.carrier ? 'Tracking Number' : 'Carrier'}
-                                                        </div>
-                                                        {shipment.trackingNumber ? (
-                                                            <div className="font-mono text-sm text-blue-400 flex items-center gap-2">
-                                                                {shipment.trackingNumber}
-                                                                <a
-                                                                    href={`${carrierInfo[shipment.carrier as keyof typeof carrierInfo]?.trackingUrl}${shipment.trackingNumber}`}
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    className="hover:text-blue-300"
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                >
-                                                                    <ExternalLink className="w-3 h-3" />
-                                                                </a>
-                                                            </div>
-                                                        ) : (
-                                                            <div className="text-sm text-slate-500">Not assigned</div>
-                                                        )}
-                                                    </div>
-                                                </div>
-
-                                                {/* Actions */}
-                                                <div className="flex gap-3">
-                                                    {shipment.status === 'packed' && !shipment.carrier && (
-                                                        <>
-                                                            <select
-                                                                className="px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:border-blue-500"
-                                                                onClick={(e) => e.stopPropagation()}
-                                                                onChange={(e) => {
-                                                                    if (e.target.value) {
-                                                                        handleConfirmShipment(shipment.id, e.target.value);
-                                                                    }
-                                                                }}
-                                                                defaultValue=""
-                                                            >
-                                                                <option value="" disabled>Select Carrier</option>
-                                                                <option value="fedex">FedEx</option>
-                                                                <option value="ups">UPS</option>
-                                                                <option value="dhl">DHL</option>
-                                                                <option value="usps">USPS</option>
-                                                            </select>
-                                                            <Button
-                                                                variant="primary"
-                                                                size="sm"
-                                                                leftIcon={<Printer className="w-4 h-4" />}
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    handleGenerateLabel(shipment.id);
-                                                                }}
-                                                            >
-                                                                Generate Label
-                                                            </Button>
-                                                            <Button
-                                                                variant="secondary"
-                                                                size="sm"
-                                                                leftIcon={<QrCode className="w-4 h-4" />}
-                                                                onClick={(e) => e.stopPropagation()}
-                                                            >
-                                                                QR Code
-                                                            </Button>
-                                                        </>
-                                                    )}
-
-                                                    {shipment.status === 'shipped' && (
-                                                        <div className="flex items-center gap-2 text-emerald-400">
-                                                            <CheckCircle className="w-4 h-4" />
-                                                            <span className="text-sm font-medium">
-                                                                Shipped via {carrierInfo[shipment.carrier as keyof typeof carrierInfo]?.name} • {formatRelativeTime(shipment.shippedAt!)}
-                                                            </span>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
+                                {/* Shipment Table */}
+                                <Card padded={false} className="overflow-hidden">
+                                    <div className="p-6 border-b border-slate-100 bg-white flex items-center justify-between">
+                                        <h2 className="text-lg font-bold text-slate-900">Packed Shipments</h2>
+                                        <div className="relative">
+                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                            <input
+                                                type="text"
+                                                placeholder="Search orders..."
+                                                className="pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                                            />
                                         </div>
                                     </div>
 
-                                    {/* Expanded Details */}
-                                    {expandedRow === shipment.id && (
-                                        <div className="px-6 pb-6 bg-slate-800/20">
-                                            <div className="pt-4 border-t border-slate-700/50">
-                                                <h4 className="text-sm font-semibold text-slate-300 mb-3">Line Items</h4>
-                                                <div className="space-y-2">
-                                                    {shipment.lineItems.map((item, idx) => (
-                                                        <div key={idx} className="flex items-center justify-between bg-slate-800/50 rounded-lg p-3">
-                                                            <div className="flex items-center gap-3">
-                                                                <div className="w-8 h-8 rounded bg-slate-700 flex items-center justify-center text-xs text-slate-400">
-                                                                    {idx + 1}
-                                                                </div>
-                                                                <div>
-                                                                    <div className="text-sm font-medium text-slate-200">{item.product}</div>
-                                                                    <div className="text-xs text-slate-500">SKU: {item.sku}</div>
-                                                                </div>
-                                                            </div>
-                                                            <div className="flex items-center gap-6">
-                                                                <div className="text-sm text-slate-400">
-                                                                    <MapPin className="w-3 h-3 inline mr-1" />
-                                                                    {item.location}
-                                                                </div>
-                                                                <div className="text-sm font-semibold text-slate-100">
-                                                                    Qty: {item.quantity}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    ))}
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left border-collapse">
+                                            <thead>
+                                                <tr className="bg-slate-50 border-b border-slate-100">
+                                                    <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Order Details</th>
+                                                    <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Units</th>
+                                                    <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Weight</th>
+                                                    <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
+                                                    <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {shipments.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan={5} className="px-6 py-12 text-center text-slate-400 italic">
+                                                            No packed shipments found in this wave.
+                                                        </td>
+                                                    </tr>
+                                                ) : (
+                                                    shipments.map((shipment) => (
+                                                        <React.Fragment key={shipment.id}>
+                                                            <tr className={cn(
+                                                                "hover:bg-blue-50/30 transition-colors cursor-pointer",
+                                                                expandedShipmentId === shipment.id && "bg-blue-50/50"
+                                                            )} onClick={() => setExpandedShipmentId(expandedShipmentId === shipment.id ? null : shipment.id)}>
+                                                                <td className="px-6 py-4">
+                                                                    <div className="flex items-center gap-3">
+                                                                        <div className="w-8 h-8 rounded bg-slate-100 flex items-center justify-center">
+                                                                            {expandedShipmentId === shipment.id ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                                                        </div>
+                                                                        <div>
+                                                                            <p className="font-bold text-slate-900">{shipment.order_number}</p>
+                                                                            <p className="text-sm text-slate-500">{shipment.customer_name}</p>
+                                                                        </div>
+                                                                    </div>
+                                                                </td>
+                                                                <td className="px-6 py-4">
+                                                                    <span className="font-medium text-slate-700">
+                                                                        {shipment.shipment_lines.reduce((acc, curr) => acc + curr.quantity, 0)}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-6 py-4">
+                                                                    <span className="font-medium text-slate-700">
+                                                                        {shipment.shipment_lines.reduce((acc, curr) => acc + (curr.product.weight * curr.quantity), 0).toFixed(2)} kg
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-6 py-4">
+                                                                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+                                                                        PACKED
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-6 py-4 text-right">
+                                                                    <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                                                                        <Button size="sm" variant="secondary" onClick={() => handlePrintLabel(shipment.id)}>
+                                                                            <Printer className="w-4 h-4 mr-2" />
+                                                                            Print
+                                                                        </Button>
+                                                                        <Button
+                                                                            size="sm"
+                                                                            variant="primary"
+                                                                            onClick={() => handleConfirm(shipment.id)}
+                                                                            isLoading={isConfirming === shipment.id}
+                                                                        >
+                                                                            Confirm
+                                                                        </Button>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                            {expandedShipmentId === shipment.id && (
+                                                                <tr className="bg-slate-50/50">
+                                                                    <td colSpan={5} className="px-6 py-6 border-b border-slate-100">
+                                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 animate-slide-up">
+                                                                            <div className="space-y-4">
+                                                                                <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                                                    <Package className="w-4 h-4" /> Package Contents
+                                                                                </h4>
+                                                                                <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                                                                                    <table className="w-full text-sm">
+                                                                                        <thead>
+                                                                                            <tr className="bg-slate-50 text-slate-500 font-medium">
+                                                                                                <th className="px-4 py-2">SKU</th>
+                                                                                                <th className="px-4 py-2 text-center">Qty</th>
+                                                                                                <th className="px-4 py-2 text-right">Item</th>
+                                                                                            </tr>
+                                                                                        </thead>
+                                                                                        <tbody className="divide-y divide-slate-100 text-slate-700">
+                                                                                            {shipment.shipment_lines.map((line) => (
+                                                                                                <tr key={line.id}>
+                                                                                                    <td className="px-4 py-2 font-mono text-xs">{line.product.sku}</td>
+                                                                                                    <td className="px-4 py-2 text-center font-bold">{line.quantity}</td>
+                                                                                                    <td className="px-4 py-2 text-right">{line.product.name}</td>
+                                                                                                </tr>
+                                                                                            ))}
+                                                                                        </tbody>
+                                                                                    </table>
+                                                                                </div>
+                                                                            </div>
+
+                                                                            <div className="space-y-4">
+                                                                                <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                                                    <Scan className="w-4 h-4" /> Verify & Label
+                                                                                </h4>
+                                                                                <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-4">
+                                                                                    <div className="flex gap-2">
+                                                                                        <Input
+                                                                                            placeholder="Scan shipment barcode..."
+                                                                                            value={scannedBarcode}
+                                                                                            onChange={(e) => setScannedBarcode(e.target.value)}
+                                                                                            onKeyPress={(e) => e.key === 'Enter' && handleVerify(shipment.id, scannedBarcode)}
+                                                                                            className="flex-1"
+                                                                                        />
+                                                                                        <Button
+                                                                                            variant="secondary"
+                                                                                            onClick={() => handleVerify(shipment.id, scannedBarcode)}
+                                                                                            isLoading={isVerifying === shipment.id}
+                                                                                        >
+                                                                                            Verify
+                                                                                        </Button>
+                                                                                    </div>
+                                                                                    <div className="flex items-center justify-between p-3 bg-blue-50 rounded-lg text-blue-700">
+                                                                                        <div className="flex items-center gap-3">
+                                                                                            <QrCode className="w-8 h-8" />
+                                                                                            <div>
+                                                                                                <p className="text-xs font-bold uppercase">Order QR Code</p>
+                                                                                                <p className="text-[10px] opacity-70">Scan for external tracking app</p>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                        <ArrowRight className="w-4 h-4 opacity-50" />
+                                                                                    </div>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            )}
+                                                        </React.Fragment>
+                                                    ))
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </Card>
+                            </div>
+
+                            {/* Hand-off Log Sidebar */}
+                            <Card padded={false} className="lg:col-span-1 h-fit">
+                                <div className="p-4 border-b border-slate-100 bg-white sticky top-0 z-10 flex items-center gap-2">
+                                    <History className="w-4 h-4 text-slate-500" />
+                                    <h2 className="text-sm font-bold text-slate-900">Hand-off Log</h2>
+                                </div>
+                                <div className="max-h-[600px] overflow-y-auto p-4 space-y-3">
+                                    {handOffLog.length === 0 ? (
+                                        <div className="text-center py-10 opacity-50">
+                                            <History className="w-8 h-8 mx-auto mb-2" />
+                                            <p className="text-xs">No shipments processed yet.</p>
+                                        </div>
+                                    ) : (
+                                        handOffLog.map((log) => (
+                                            <div key={log.id} className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex flex-col gap-2">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[10px] font-bold text-blue-600 uppercase bg-blue-50 px-1.5 py-0.5 rounded">
+                                                        {log.carrier}
+                                                    </span>
+                                                    <span className="text-[10px] text-slate-400">
+                                                        {new Date(log.shipped_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    </span>
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-bold text-slate-900">{log.shipment.order_number}</p>
+                                                    <p className="text-[11px] text-slate-500 truncate">{log.tracking_number}</p>
+                                                </div>
+                                                <div className="pt-2 border-t border-slate-200/50 flex items-center justify-between">
+                                                    <span className="text-[10px] text-slate-400">By {log.user.full_name}</span>
+                                                    <span className="text-[10px] font-medium text-slate-600">{log.weight_kg} kg</span>
                                                 </div>
                                             </div>
-                                        </div>
+                                        ))
                                     )}
                                 </div>
-                            ))}
+                            </Card>
                         </div>
-                    </Card>
+                    )}
 
-                    {/* Carrier Pickup Schedule */}
-                    <Card variant="glass" className="mt-8">
-                        <CardHeader
-                            title="Today's Carrier Pickups"
-                            subtitle="Scheduled pickup times and contact information"
-                        />
-                        <div className="mt-6 space-y-4">
-                            {Object.entries(carrierInfo).map(([key, info]) => (
-                                <div key={key} className="flex items-center justify-between p-4 bg-slate-800/50 rounded-lg">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-slate-700 to-slate-800 flex items-center justify-center">
-                                            <Truck className="w-5 h-5 text-slate-300" />
-                                        </div>
-                                        <div>
-                                            <div className="font-semibold text-slate-100">{info.name}</div>
-                                            <div className="text-sm text-slate-400">
-                                                Daily Pickup • {key === 'fedex' ? '4:00 PM' : key === 'ups' ? '5:00 PM' : key === 'dhl' ? '3:30 PM' : '2:00 PM'}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <Button variant="secondary" size="sm">
-                                        Request Early Pickup
-                                    </Button>
-                                </div>
-                            ))}
-                        </div>
-                    </Card>
+                    {/* Quick Tips */}
+                    <div className="flex items-center gap-3 p-4 bg-amber-50 rounded-xl border border-amber-100">
+                        <Info className="w-5 h-5 text-amber-600" />
+                        <p className="text-sm text-amber-800">
+                            <span className="font-bold">Pro Tip:</span> Print thermal labels before scanning to ensure barcodes are ready for verification. Use ZPL compatible printers for best results.
+                        </p>
+                    </div>
                 </div>
             </main>
         </div>
